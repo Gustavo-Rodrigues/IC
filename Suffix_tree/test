@@ -1,0 +1,3 @@
+function test()
+    Suffix_tree.SuffixTree();
+end
