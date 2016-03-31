@@ -27,6 +27,10 @@
 #include <alloca.h>
 #include <cstring>
 #include <math.h>
+#include <unistd.h>
+#include <ios>
+#include <memory>
+
 
 using namespace std;
 using std::cout;
@@ -145,6 +149,8 @@ class Period{
         double confidence;
         int period;
 };
+
+vector<Edge*> cleanup;
 
 const int MAX_LENGTH = 1000;
 const int HASH_TABLE_SIZE = 2179;  //A prime roughly 10% larger
@@ -529,6 +535,8 @@ vector<Edge> init_ocurrence_vector(){
     }
     cout << endl;
     */
+    //cout << "EDGES" << edges.size() << "\n";
+    //cout << "INNER EDGES: " << inner_edges.size() << "\n";
     return inner_edges;
 }
 
@@ -645,7 +653,7 @@ vector<Period> period_detection_with_tolerance(vector<Edge> inner_edges, int tol
             }
             //double meanP = (double) sumPer-(p/(count-1));
             double conf = (double) count/(floor((strlen(T)-stPos+1)/p));
-            if(conf >= 0.9){
+            if(conf >= 0.8){
                 period.sequence = get_substring(inner_edges[a].end_node);
                 period.confidence = conf;
                 period.period = p;
@@ -765,6 +773,7 @@ int Edge::SplitEdge( Suffix &s )
       new Edge( first_char_index,
                 first_char_index + s.last_char_index - s.first_char_index,
                 s.origin_node );
+    cleanup.push_back(new_edge);
     new_edge->Insert();
     Nodes[ new_edge->end_node ].suffix_node = s.origin_node;
     first_char_index += s.last_char_index - s.first_char_index + 1;
@@ -883,6 +892,7 @@ void AddPrefix( Suffix &active, int last_char_index )
 // the last node we visited.
         Edge *new_edge = new Edge( last_char_index, N, parent_node );
         new_edge->Insert();
+        cleanup.push_back(new_edge);
         if ( last_parent_node > 0 )
             Nodes[ last_parent_node ].suffix_node = parent_node;
         last_parent_node = parent_node;
@@ -901,10 +911,46 @@ void AddPrefix( Suffix &active, int last_char_index )
     active.Canonize();
 };
 
+void process_mem_usage(double& vm_usage, double& resident_set){
+   using std::ios_base;
+   using std::ifstream;
+   using std::string;
+
+   vm_usage     = 0.0;
+   resident_set = 0.0;
+
+   // 'file' stat seems to give the most reliable results
+   //
+   ifstream stat_stream("/proc/self/stat",ios_base::in);
+
+   // dummy vars for leading entries in stat that we don't care about
+   //
+   string pid, comm, state, ppid, pgrp, session, tty_nr;
+   string tpgid, flags, minflt, cminflt, majflt, cmajflt;
+   string utime, stime, cutime, cstime, priority, nice;
+   string O, itrealvalue, starttime;
+
+   // the two fields we want
+   //
+   unsigned long vsize;
+   long rss;
+
+   stat_stream >> pid >> comm >> state >> ppid >> pgrp >> session >> tty_nr
+               >> tpgid >> flags >> minflt >> cminflt >> majflt >> cmajflt
+               >> utime >> stime >> cutime >> cstime >> priority >> nice
+               >> O >> itrealvalue >> starttime >> vsize >> rss; // don't care about the rest
+
+   stat_stream.close();
+
+   long page_size_kb = sysconf(_SC_PAGE_SIZE) / 1024; // in case x86-64 is configured to use 2MB pages
+   vm_usage     = vsize / 1024.0;
+   resident_set = rss * page_size_kb;
+}
+
 int main(int argc, char* argv[]){
 
     /*TODO:
-        Check if the memory will go haywire - YAY!! i didn't went
+        Check if the memory will go haywire - YAY!! i didn't went - I guess was to son to celebrate
     */
     std::clock_t start;
     start = std::clock();
@@ -925,41 +971,60 @@ int main(int argc, char* argv[]){
 
     Edge edges_initial_state[ HASH_TABLE_SIZE ];
     Node nodes_inicial_state[ MAX_LENGTH * 2 ];
+    for(int he = 0; he<HASH_TABLE_SIZE;he++){
+        edges_initial_state[he].start_node = -1;
+    }
+    for(int lp = 0; lp<MAX_LENGTH*2; lp++){
+        nodes_inicial_state[lp].suffix_node = -1;
+    }
     copy(std::begin(Edges), std::end(Edges), std::begin(edges_initial_state));
     copy(std::begin(Nodes), std::end(Nodes), std::begin(nodes_inicial_state));
+    int subject_total_periods_over_threshold = 0;
+    int subject_total_periods_string_size = 0;
+    int subject_period_total_length = 0;
+    int subject_total_periods = 0;
+    double vm, rss;
 
     for(int f=1;f<=18;f++){
         cout << "Channel:" << f << endl;
         string channel = to_string(f);
-        file_name = file_name+"Channel"+channel;
-        file.open(file_name);
+        string file_path = file_name+"Channel"+channel;
+        //cout << file_path << "\n";
+        file.open(file_path);
         string line;
+
 
         int lines = 0;
         vector<Period> intel;
         int periods_over_threshold = 0;
         int periods_string_size = 0;
-        int total_periods_over_threshold = 0;
-        int total_periods_string_size = 0;
+        int channel_total_periods_over_threshold = 0;
+        int channel_total_periods_string_size = 0;
+        int channel_period_total_length = 0;
+        int channel_total_periods = 0;
+        unique_ptr<Edge> new_edge(new Edge());
+        unique_ptr<Node> new_node(new Node());
 
         if (file.is_open()){
             while(getline(file,line)){
-                //period vector
-
-
                 Node::Count = 1;
-                //reset the global variables
-                copy(std::begin(edges_initial_state), std::end(edges_initial_state), std::begin(Edges));
-                copy(std::begin(nodes_inicial_state), std::end(nodes_inicial_state), std::begin(Nodes));
-
+                for(int he = 0; he<HASH_TABLE_SIZE;he++){
+                    new_edge->start_node = -1;
+                    Edges[he] = *new_edge;
+                }
+                for(int lp = 0; lp<MAX_LENGTH*2; lp++){
+                    Nodes[lp] = *new_node;
+                }
 
                 //getline(file,line);
+                for(int s = 0;s<MAX_LENGTH;s++){
+                    T[s] = '\0';
+                }
                 lines++;
                 strcpy(T, line.c_str());
                 T[line.size()] = '$';
                 //cout << line;
                 //cout << "STRING: "<< T << " LENGTH: " << strlen(T) << endl;
-
 
                 N = strlen( T ) - 1;
                 Suffix active( 0, 0, -1 );  // The initial active prefix
@@ -968,18 +1033,38 @@ int main(int argc, char* argv[]){
                 }
                 //if(lines == 1) break;
                 intel = period_detection_with_tolerance(init_ocurrence_vector(), 1);
+                //process_mem_usage(vm, rss);
+                /*
+                int edge_count = 0;
+                for(int u = 0; u<HASH_TABLE_SIZE;u++){
+                    if(Edges[u].start_node != -1){
+                        edge_count++;
+                    }
+                }
+                */
                 if(intel.size()>0){
                     periods_over_threshold++;
-                    total_periods_over_threshold++;
+                    channel_total_periods_over_threshold++;
+                    subject_total_periods_over_threshold++;
                 }
                 for(int q = 0; q<intel.size(); q++){
                     if(intel[q].sequence.size()>=5){
                         periods_string_size++;
-                        total_periods_string_size++;
+                        channel_total_periods_string_size++;
+                        subject_total_periods_string_size++;
                         break;
                     }
                 }
+
+                for(int f = 0; f<intel.size(); f++){
+                    subject_period_total_length += intel[f].sequence.size();
+                    subject_total_periods++;
+                    channel_period_total_length += intel[f].sequence.size();
+                    channel_total_periods++;
+                }
                 if(lines%2000 == 0){
+                    //cout << "STRING: " << T << endl;
+                    //cout << "EDGE COUNT:" << edge_count << "\n";
                     cout.precision(3);
                     cout << "Combination: " << setw(3) <<  lines/2000
                     << setw(1) << " Periods over threshold: " <<  setw(3) << periods_over_threshold << "/2000" <<" = "
@@ -990,19 +1075,7 @@ int main(int argc, char* argv[]){
                     periods_string_size = 0;
                 }
 
-
-                /*
-                //count edges to verify if the global variables aren't haywire
-                int edge_count = 0;
-                for(int u = 0; u<HASH_TABLE_SIZE;u++){
-                    if(Edges[u].start_node != -1){
-                        edge_count++;
-                    }
-                }
-                */
-
-                //cout << "line: "<< lines << endl;
-
+                //cout << "line: "<< lines << endl
                 /*
                 if(lines > 286450){
                     cout << T;
@@ -1015,38 +1088,98 @@ int main(int argc, char* argv[]){
                     //period_detection(init_ocurrence_vector(), subject, channel);
                 }
                 */
+                for(int plz = 0; plz<cleanup.size();plz++){
+                    delete cleanup[plz];
+                }
+                cleanup.clear();
+                intel.clear();
             }
         file.close();
         }else cout << "Unable to open file";
         cout.precision(3);
-        cout << "Total periods over threshold: " << (double) total_periods_over_threshold/364000
-        << "Total periods over 5:" << (double) total_periods_string_size/364000 << endl; 
+        cout << endl;
+        cout << "Channel total periods over threshold: " << (double) channel_total_periods_over_threshold/364000
+        << " Channel total periods over 5: " << (double) channel_total_periods_string_size/364000 << endl;
+
+        cout.precision(3);
+        cout << endl;
+        cout << "Channel average period length: " << (double) channel_period_total_length/channel_total_periods << endl;
     }
 
-    /*
+    cout << endl;
+    cout.precision(3);
+    cout << "Subject total periods over threshold: " << (double) subject_total_periods_over_threshold/(18*364000)
+    << " Subject total periods over 5: " << (double) subject_total_periods_string_size/(18*364000) << endl;
+
+    cout.precision(3);
+    cout << endl;
+    cout << "Subject average period length: " << (double) subject_period_total_length/subject_total_periods << endl;
+    //file.close();
+    cout << endl;
     std::cout << "Time: " << (std::clock() - start) / (double)(CLOCKS_PER_SEC / 1000) << " ms" << std::endl;
-    cout << "Normally, suffix trees require that the last\n"
-         << "character in the input string be unique.  If\n"
-         << "you don't do this, your tree will contain\n"
-         << "suffixes that don't end in leaf nodes.  This is\n"
-         << "often a useful requirement. You can build a tree\n"
-         << "in this program without meeting this requirement,\n"
-         << "but the validation code will flag it as being an\n"
-         << "invalid tree\n\n";
-    cout << "Enter string: " << flush;
-    cin.getline( T, MAX_LENGTH - 1 );
-    N = strlen( T ) - 1;
-    */
-//
-// The active point is the first non-leaf suffix in the
-// tree.  We start by setting this to be the empty string
-// at node 0.  The AddPrefix() function will update this
-// value after every new prefix is added.
-//
+
     /*
-    Suffix active( 0, 0, -1 );  // The initial active prefix
-    for ( int i = 0 ; i <= N ; i++ )
-        AddPrefix( active, i );
+    Edge edges_initial_state[ HASH_TABLE_SIZE ];
+    Node nodes_inicial_state[ MAX_LENGTH * 2 ];
+    vector<Edge*> edge_cleanup;
+    vector<Node*> node_cleanup;
+    for(int k=0; k<2; k++){
+        for(int he = 0; he<HASH_TABLE_SIZE;he++){
+            unique_ptr<Edge> new_edge(new Edge());
+            new_edge->start_node = -1;
+            Edges[he] = *new_edge;
+            //edge_cleanup.push_back(new_edge);
+        }
+        for(int lp = 0; lp<MAX_LENGTH*2; lp++){
+            unique_ptr<Node> new_node(new Node());
+            Nodes[lp] = *new_node;
+            //node_cleanup.push_back(new_node);
+        }
+        Node::Count = 0;
+        copy(std::begin(edges_initial_state), std::end(edges_initial_state), std::begin(Edges));
+        copy(std::begin(nodes_inicial_state), std::end(nodes_inicial_state), std::begin(Nodes));
+
+        cout << "Normally, suffix trees require that the last\n"
+             << "character in the input string be unique.  If\n"
+             << "you don't do this, your tree will contain\n"
+             << "suffixes that don't end in leaf nodes.  This is\n"
+             << "often a useful requirement. You can build a tree\n"
+             << "in this program without meeting this requirement,\n"
+             << "but the validation code will flag it as being an\n"
+             << "invalid tree\n\n";
+        cout << "Enter string: " << flush;
+        cin.getline( T, MAX_LENGTH - 1 );
+        N = strlen( T ) - 1;
+    //
+    // The active point is the first non-leaf suffix in the
+    // tree.  We start by setting this to be the empty string
+    // at node 0.  The AddPrefix() function will update this
+    // value after every new prefix is added.
+    //
+
+
+        for(int l=0 ; l<HASH_TABLE_SIZE; l++){
+            cout << Edges[l].start_node;
+        }
+        cout << endl;
+        Suffix active( 0, 0, -1 );  // The initial active prefix
+        for ( int i = 0 ; i <= N ; i++ )
+            AddPrefix( active, i );
+        dump_edges( N );
+        cout << endl;
+        for(int j=0 ; j<HASH_TABLE_SIZE; j++){
+            cout << Edges[j].start_node;
+        }
+        for(int del=0;del<HASH_TABLE_SIZE;del++){
+            if(edge_cleanup[del] != NULL) delete edge_cleanup[del];
+        }
+        for(int del_node=0;del_node<2*MAX_LENGTH;del_node){
+            if(node_cleanup[del_node] != NULL) delete node_cleanup[del_node];
+        }
+        edge_cleanup.clear();
+        node_cleanup.clear();
+
+    }
     */
 //
 // Once all N prefixes have been added, the resulting table
